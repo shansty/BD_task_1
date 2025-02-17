@@ -18,9 +18,6 @@ const server = createServer(app);
 const PORT = 3001;
 
 const { Pool } = pkg;
-const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-});
 const UPLOADS_FOLDER = process.env.UPLOADS_FOLDER || "./uploads";
 
 
@@ -47,16 +44,19 @@ app.post("/import-csv", upload.single("file"), async (req, res) => {
         let count = 0;
 
         const stream = fs.createReadStream(req.file.path).pipe(csv());
-
+        const pool = new Pool({
+            connectionString: process.env.DATABASE_URL,
+        });
         stream.on("data", async (row) => {
             batch.push(row);
             count++;
+
 
             if (count % BATCH_SIZE === 0) {
                 stream.pause();
                 console.log(`Processing batch ${count / BATCH_SIZE}...`);
                 try {
-                    await insertData(batch);
+                    await insertData(batch, pool);
                 } catch {
                     stream.destroy();
                     return;
@@ -68,7 +68,7 @@ app.post("/import-csv", upload.single("file"), async (req, res) => {
         stream.on("end", async () => {
             if (batch.length > 0) {
                 console.log("Processing last batch...");
-                await insertData(batch);
+                await insertData(batch, pool);
             }
             console.log("CSV processing completed.");
             pool.end();
@@ -81,38 +81,53 @@ app.post("/import-csv", upload.single("file"), async (req, res) => {
 });
 
 
-async function insertData(batch) {
+async function insertData(batch, pool) {
     const client = await pool.connect();
     try {
-        await client.query("BEGIN"); // Start transaction
+        await client.query("BEGIN"); 
 
-        // 1️⃣ Insert Coordinates (Avoid duplicates using ON CONFLICT)
+        const parseCoordinate = (value) => {
+            return value === "" || value === null ? 0 : value;
+        };
+
+        
+        debugger;
+
         const coordinatesValues = batch
-            .flatMap(row => [[row.start_lat, row.start_lng], [row.end_lat, row.end_lng]]);
-            
+            .flatMap(row => [[parseCoordinate(row.start_lat), parseCoordinate(row.start_lng)], [parseCoordinate(row.end_lat), parseCoordinate(row.end_lng)]]);
+
+        debugger;
+
         const coordinates_placeholders = coordinatesValues
             .map((_, i) => `($${i * 2 + 1}, $${i * 2 + 2})`)
             .join(", ");
 
-        console.log(coordinates_placeholders)
+        debugger;
+
+
         await client.query(
             `INSERT INTO Coordinates (lat, lng) 
              VALUES ${coordinates_placeholders}
-             ON CONFLICT DO NOTHING`,
+             ON CONFLICT (lat, lng) DO NOTHING`,
             coordinatesValues.flat()
         );
-        console.log(`coord + ${coordinatesValues}`)
 
-        // 2️⃣ Insert Stations (Avoid duplicates)
+        debugger;
+
+        
         const stationsValues = batch
             .flatMap(row => [
-                [row.start_station_id, row.start_station_name, row.start_lat, row.start_lng],
-                [row.end_station_id, row.end_station_name, row.end_lat, row.end_lng]
+                [row.start_station_id, row.start_station_name, parseCoordinate(row.start_lat), parseCoordinate(row.start_lng)],
+                [row.end_station_id, row.end_station_name, parseCoordinate(row.end_lat), parseCoordinate(row.end_lng)]
             ]);
+
+        debugger;
 
         const stations_placeholders = stationsValues
             .map((_, i) => `($${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}, $${i * 4 + 4})`)
             .join(", ");
+
+        debugger;
 
 
         await client.query(
@@ -126,36 +141,31 @@ async function insertData(batch) {
             stationsValues.flat()
         );
 
-        // 3️⃣ Insert Ride Sessions (Bulk Insert)
-        const rideSessionsValues = batch.map(row => [row.started_at, row.ended_at]);
+        debugger;
 
-        const rideSessions_placeholders = rideSessionsValues
-            .map((_, i) => `($${i * 2 + 1}, $${i * 2 + 2})`)
-            .join(", ");
-
-        const rideSessionRes = await client.query(
-            `INSERT INTO Ride_sessions (started_at, ended_at) 
-                 VALUES ${rideSessions_placeholders}
-                 RETURNING ride_session_id`,
-            rideSessionsValues.flat()
-        );
-        const rideSessionIds = rideSessionRes.rows.map(row => row.ride_session_id);
-
-        // 4️⃣ Insert Rides (Bulk Insert)
+       
         const ridesValues = batch.map((row, index) => [
-            row.ride_id, row.rideable_type, rideSessionIds[index], row.start_station_id, row.end_station_id, row.member_casual
+            row.ride_id, row.rideable_type, row.started_at, row.ended_at, row.start_station_id, row.end_station_id, row.member_casual
         ]);
 
+        debugger;
+
         const ride_placeholderrs = ridesValues
-            .map((_, i) => `($${i * 6 + 1}, $${i * 6 + 2}, $${i * 6 + 3}, $${i * 6 + 4}, $${i * 6 + 5}, $${i * 6 + 6})`)
+            .map((_, i) => `($${i * 7 + 1}, $${i * 7 + 2}, $${i * 7 + 3}, $${i * 7 + 4}, $${i * 7 + 5}, $${i * 7 + 6}, $${i * 7 + 7})`)
+
+        debugger;
 
         await client.query(
-            `INSERT INTO Rides (ride_id, rideable_type, ride_session_id, start_station_id, end_station_id, member_casual) 
-     VALUES ${ride_placeholderrs}`,
-            ridesValues.flat()
+            `INSERT INTO Rides (ride_id, rideable_type, started_at, ended_at, start_station_id, end_station_id, member_casual) 
+                VALUES ${ride_placeholderrs}
+                ON CONFLICT (ride_id) DO NOTHING`,
+                ridesValues.flat()
         );
 
-        await client.query("COMMIT"); // Commit all queries at once
+        debugger;
+
+        await client.query("COMMIT"); 
+        
         console.log(`Inserted ${batch.length} records successfully.`);
     } catch (error) {
         await client.query("ROLLBACK");
