@@ -10,19 +10,12 @@ import pkg from "pg";
 
 dotenv.config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 const app = express();
 const server = createServer(app);
 const PORT = 3001;
 
 const { Pool } = pkg;
 const UPLOADS_FOLDER = process.env.UPLOADS_FOLDER || "./uploads";
-
-
-// app.use(express.json());
-// app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
@@ -47,34 +40,47 @@ app.post("/import-csv", upload.single("file"), async (req, res) => {
         const pool = new Pool({
             connectionString: process.env.DATABASE_URL,
         });
+
         stream.on("data", async (row) => {
-            batch.push(row);
-            count++;
+            try {
+                batch.push(row);
+                console.log(`batch + ${batch.length}`)
+                count++;
 
-
-            if (count % BATCH_SIZE === 0) {
-                stream.pause();
-                console.log(`Processing batch ${count / BATCH_SIZE}...`);
-                try {
+                if (count % BATCH_SIZE === 0) {
+                    stream.pause();
+                    console.log(`Processing batch ${count / BATCH_SIZE}...`);
                     await insertData(batch, pool);
-                } catch {
-                    stream.destroy();
-                    return;
+                    batch = [];
+                    stream.resume();
                 }
-                batch = [];
-                stream.resume();
+            } catch (err) {
+                console.error("Error inserting batch:", err);
+                stream.destroy();
+                res.status(500).json({ error: "Error processing CSV data" });
             }
-        });
-        stream.on("end", async () => {
-            if (batch.length > 0) {
-                console.log("Processing last batch...");
-                await insertData(batch, pool);
-            }
-            console.log("CSV processing completed.");
-            pool.end();
         });
 
-        res.status(200).json({ message: "CSV data imported successfully" });
+        stream.on("end", async () => {
+            try {
+                if (batch.length > 0) {
+                    console.log("Processing last batch...");
+                    await insertData(batch, pool);
+                }
+                console.log("CSV processing completed.");
+                pool.end();
+                res.status(200).json({ message: "CSV data imported successfully" });
+            } catch (err) {
+                console.error("Error inserting batch:", err);
+                res.status(500).json({ error: "Error processing CSV data" });
+            }
+        });
+
+        stream.on("error", (error) => {
+            console.error("Stream error:", error);
+            res.status(500).json({ error: "Error reading CSV file" });
+        });
+
     } catch (error) {
         console.error("Error inserting data:", error);
     }
@@ -84,13 +90,13 @@ app.post("/import-csv", upload.single("file"), async (req, res) => {
 async function insertData(batch, pool) {
     const client = await pool.connect();
     try {
-        await client.query("BEGIN"); 
+        await client.query("BEGIN");
 
         const parseCoordinate = (value) => {
             return value === "" || value === null ? 0 : value;
         };
 
-        
+
         debugger;
 
         const coordinatesValues = batch
@@ -114,7 +120,7 @@ async function insertData(batch, pool) {
 
         debugger;
 
-        
+
         const stationsValues = batch
             .flatMap(row => [
                 [row.start_station_id, row.start_station_name, parseCoordinate(row.start_lat), parseCoordinate(row.start_lng)],
@@ -143,7 +149,7 @@ async function insertData(batch, pool) {
 
         debugger;
 
-       
+
         const ridesValues = batch.map((row, index) => [
             row.ride_id, row.rideable_type, row.started_at, row.ended_at, row.start_station_id, row.end_station_id, row.member_casual
         ]);
@@ -159,17 +165,18 @@ async function insertData(batch, pool) {
             `INSERT INTO Rides (ride_id, rideable_type, started_at, ended_at, start_station_id, end_station_id, member_casual) 
                 VALUES ${ride_placeholderrs}
                 ON CONFLICT (ride_id) DO NOTHING`,
-                ridesValues.flat()
+            ridesValues.flat()
         );
 
         debugger;
 
-        await client.query("COMMIT"); 
-        
+        await client.query("COMMIT");
+
         console.log(`Inserted ${batch.length} records successfully.`);
     } catch (error) {
         await client.query("ROLLBACK");
         console.error("Error inserting data:", error);
+        throw error;
     } finally {
         client.release();
     }
