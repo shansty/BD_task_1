@@ -1,10 +1,8 @@
 import express from "express";
 import { createServer } from 'node:http';
 import multer from "multer";
-import path from "path";
 import fs from "fs";
 import csv from "csv-parser";
-import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 import pkg from "pg";
 
@@ -44,7 +42,6 @@ app.post("/import-csv", upload.single("file"), async (req, res) => {
         stream.on("data", async (row) => {
             try {
                 batch.push(row);
-                console.log(`batch + ${batch.length}`)
                 count++;
 
                 if (count % BATCH_SIZE === 0) {
@@ -92,49 +89,28 @@ async function insertData(batch, pool) {
     try {
         await client.query("BEGIN");
 
-        const parseCoordinate = (value) => {
-            return value === "" || value === null ? 0 : value;
-        };
+        const parseCoordinate = (value) => value === "" || value === null ? 0 : value;
 
+        const coordinatesValues = batch.flatMap(row => [
+            [parseCoordinate(row.start_lat), parseCoordinate(row.start_lng)], [parseCoordinate(row.end_lat), parseCoordinate(row.end_lng)]
+        ]);
 
-        debugger;
-
-        const coordinatesValues = batch
-            .flatMap(row => [[parseCoordinate(row.start_lat), parseCoordinate(row.start_lng)], [parseCoordinate(row.end_lat), parseCoordinate(row.end_lng)]]);
-
-        debugger;
-
-        const coordinates_placeholders = coordinatesValues
-            .map((_, i) => `($${i * 2 + 1}, $${i * 2 + 2})`)
-            .join(", ");
-
-        debugger;
-
+        const coordinates_placeholders = coordinatesValues.map((_, i) => `($${i * 2 + 1}, $${i * 2 + 2})`).join(", ");
 
         await client.query(
             `INSERT INTO Coordinates (lat, lng) 
              VALUES ${coordinates_placeholders}
              ON CONFLICT (lat, lng) DO NOTHING`,
-            coordinatesValues.flat()
+             coordinatesValues.flat()
         );
 
-        debugger;
 
-
-        const stationsValues = batch
-            .flatMap(row => [
+        const stationsValues = batch.flatMap(row => [
                 [row.start_station_id, row.start_station_name, parseCoordinate(row.start_lat), parseCoordinate(row.start_lng)],
                 [row.end_station_id, row.end_station_name, parseCoordinate(row.end_lat), parseCoordinate(row.end_lng)]
             ]);
 
-        debugger;
-
-        const stations_placeholders = stationsValues
-            .map((_, i) => `($${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}, $${i * 4 + 4})`)
-            .join(", ");
-
-        debugger;
-
+        const stations_placeholders = stationsValues.map((_, i) => `($${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}, $${i * 4 + 4})`).join(", ");
 
         await client.query(
             `INSERT INTO Stations (station_id, name, coordinate_id)
@@ -147,19 +123,12 @@ async function insertData(batch, pool) {
             stationsValues.flat()
         );
 
-        debugger;
 
-
-        const ridesValues = batch.map((row, index) => [
+        const ridesValues = batch.map((row) => [
             row.ride_id, row.rideable_type, row.started_at, row.ended_at, row.start_station_id, row.end_station_id, row.member_casual
         ]);
 
-        debugger;
-
-        const ride_placeholderrs = ridesValues
-            .map((_, i) => `($${i * 7 + 1}, $${i * 7 + 2}, $${i * 7 + 3}, $${i * 7 + 4}, $${i * 7 + 5}, $${i * 7 + 6}, $${i * 7 + 7})`)
-
-        debugger;
+        const ride_placeholderrs = ridesValues.map((_, i) => `($${i * 7 + 1}, $${i * 7 + 2}, $${i * 7 + 3}, $${i * 7 + 4}, $${i * 7 + 5}, $${i * 7 + 6}, $${i * 7 + 7})`);
 
         await client.query(
             `INSERT INTO Rides (ride_id, rideable_type, started_at, ended_at, start_station_id, end_station_id, member_casual) 
@@ -168,10 +137,7 @@ async function insertData(batch, pool) {
             ridesValues.flat()
         );
 
-        debugger;
-
         await client.query("COMMIT");
-
         console.log(`Inserted ${batch.length} records successfully.`);
     } catch (error) {
         await client.query("ROLLBACK");
@@ -181,7 +147,6 @@ async function insertData(batch, pool) {
         client.release();
     }
 }
-
 
 
 server.listen(PORT, (error) => {
