@@ -148,7 +148,6 @@ async function insertData(batch, pool) {
     }
 }
 
-
 server.listen(PORT, (error) => {
     if (error) {
         console.error("Error starting server:", error);
