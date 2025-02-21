@@ -98,17 +98,32 @@ async function insertData(batch, pool) {
         const coordinates_placeholders = coordinatesValues.map((_, i) => `($${i * 2 + 1}, $${i * 2 + 2})`).join(", ");
 
         await client.query(
-            `INSERT INTO Coordinates (lat, lng) 
-             VALUES ${coordinates_placeholders}
-             ON CONFLICT (lat, lng) DO NOTHING`,
-             coordinatesValues.flat()
+            `INSERT INTO Coordinates (lat, lng)
+            SELECT DISTINCT v.lat::DOUBLE PRECISION, v.lng::DOUBLE PRECISION
+            FROM (VALUES ${coordinates_placeholders}) AS v(lat, lng)
+            ON CONFLICT (lat, lng) DO NOTHING;`,
+            coordinatesValues.flat()
         );
 
 
+        // await client.query(
+        //     `WITH new_coords AS (
+        //         INSERT INTO Coordinates (lat, lng)
+        //         SELECT DISTINCT v.lat::DOUBLE PRECISION, v.lng::DOUBLE PRECISION
+        //         FROM (VALUES ${coordinates_placeholders}) AS v(lat, lng)
+        //         ON CONFLICT (lat, lng) DO NOTHING
+        //         RETURNING coordinate_id
+        //     )
+        //     SELECT setval('coordinates_coordinate_id_seq', (coordinate_id + 1), true) FROM Coordinates;`,
+        //     coordinatesValues.flat()
+        // );
+
+
+
         const stationsValues = batch.flatMap(row => [
-                [row.start_station_id, row.start_station_name, parseCoordinate(row.start_lat), parseCoordinate(row.start_lng)],
-                [row.end_station_id, row.end_station_name, parseCoordinate(row.end_lat), parseCoordinate(row.end_lng)]
-            ]);
+            [row.start_station_id, row.start_station_name, parseCoordinate(row.start_lat), parseCoordinate(row.start_lng)],
+            [row.end_station_id, row.end_station_name, parseCoordinate(row.end_lat), parseCoordinate(row.end_lng)]
+        ]);
 
         const stations_placeholders = stationsValues.map((_, i) => `($${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}, $${i * 4 + 4})`).join(", ");
 
