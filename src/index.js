@@ -1,30 +1,14 @@
-import express from "express";
-import { createServer } from 'node:http';
-import multer from "multer";
 import fs from "fs";
 import csv from "csv-parser";
 import dotenv from "dotenv";
-import pkg from "pg";
+import pool from "./db_pool.js";
+import { server, app } from "./server.js";
+import { upload } from "./multer.js";
+import { getCoordinatesQueryText, getStationsQueryText, getRidesQueryText } from "./query_texts.js";
+import('./server.js');
+
 
 dotenv.config();
-
-const app = express();
-const server = createServer(app);
-const PORT = 3001;
-
-const { Pool } = pkg;
-const UPLOADS_FOLDER = process.env.UPLOADS_FOLDER || "./uploads";
-
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        cb(null, UPLOADS_FOLDER);
-    },
-    filename: (req, file, cb) => {
-        cb(null, `${file.originalname}-${Date.now()}`);
-    },
-});
-const upload = multer({ storage })
-const BATCH_SIZE = 1000;
 
 app.post("/import-csv", upload.single("file"), async (req, res) => {
     if (!req.file) {
@@ -35,18 +19,15 @@ app.post("/import-csv", upload.single("file"), async (req, res) => {
         let count = 0;
 
         const stream = fs.createReadStream(req.file.path).pipe(csv());
-        const pool = new Pool({
-            connectionString: process.env.DATABASE_URL,
-        });
 
         stream.on("data", async (row) => {
             try {
                 batch.push(row);
                 count++;
 
-                if (count % BATCH_SIZE === 0) {
+                if (count % process.env.BATCH_SIZE === 0) {
                     stream.pause();
-                    console.log(`Processing batch ${count / BATCH_SIZE}...`);
+                    console.log(`Processing batch ${count / process.env.BATCH_SIZE}...`);
                     await insertData(batch, pool);
                     batch = [];
                     stream.resume();
@@ -65,7 +46,6 @@ app.post("/import-csv", upload.single("file"), async (req, res) => {
                     await insertData(batch, pool);
                 }
                 console.log("CSV processing completed.");
-                pool.end();
                 res.status(200).json({ message: "CSV data imported successfully" });
             } catch (err) {
                 console.error("Error inserting batch:", err);
@@ -89,7 +69,7 @@ async function insertData(batch, pool) {
     try {
         await client.query("BEGIN");
 
-        const parseCoordinate = (value) => value === "" || value === null ? 0 : value;
+        const parseCoordinate = (value) => value === "" ? null : value;
 
         const coordinatesValues = batch.flatMap(row => [
             [parseCoordinate(row.start_lat), parseCoordinate(row.start_lng)], [parseCoordinate(row.end_lat), parseCoordinate(row.end_lng)]
@@ -98,26 +78,9 @@ async function insertData(batch, pool) {
         const coordinates_placeholders = coordinatesValues.map((_, i) => `($${i * 2 + 1}, $${i * 2 + 2})`).join(", ");
 
         await client.query(
-            `INSERT INTO Coordinates (lat, lng)
-            SELECT DISTINCT v.lat::DOUBLE PRECISION, v.lng::DOUBLE PRECISION
-            FROM (VALUES ${coordinates_placeholders}) AS v(lat, lng)
-            ON CONFLICT (lat, lng) DO NOTHING;`,
+            getCoordinatesQueryText(coordinates_placeholders),
             coordinatesValues.flat()
         );
-
-
-        // await client.query(
-        //     `WITH new_coords AS (
-        //         INSERT INTO Coordinates (lat, lng)
-        //         SELECT DISTINCT v.lat::DOUBLE PRECISION, v.lng::DOUBLE PRECISION
-        //         FROM (VALUES ${coordinates_placeholders}) AS v(lat, lng)
-        //         ON CONFLICT (lat, lng) DO NOTHING
-        //         RETURNING coordinate_id
-        //     )
-        //     SELECT setval('coordinates_coordinate_id_seq', (coordinate_id + 1), true) FROM Coordinates;`,
-        //     coordinatesValues.flat()
-        // );
-
 
 
         const stationsValues = batch.flatMap(row => [
@@ -128,27 +91,19 @@ async function insertData(batch, pool) {
         const stations_placeholders = stationsValues.map((_, i) => `($${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}, $${i * 4 + 4})`).join(", ");
 
         await client.query(
-            `INSERT INTO Stations (station_id, name, coordinate_id)
-                 SELECT s.station_id, s.name, c.coordinate_id
-                 FROM (VALUES ${stations_placeholders}) AS s(station_id, name, lat, lng)
-                 JOIN Coordinates c 
-                 ON s.lat::DOUBLE PRECISION = c.lat 
-                 AND s.lng::DOUBLE PRECISION = c.lng
-                 ON CONFLICT (station_id) DO NOTHING`,
+            getStationsQueryText(stations_placeholders),
             stationsValues.flat()
         );
 
-
+        
         const ridesValues = batch.map((row) => [
             row.ride_id, row.rideable_type, row.started_at, row.ended_at, row.start_station_id, row.end_station_id, row.member_casual
         ]);
 
-        const ride_placeholderrs = ridesValues.map((_, i) => `($${i * 7 + 1}, $${i * 7 + 2}, $${i * 7 + 3}, $${i * 7 + 4}, $${i * 7 + 5}, $${i * 7 + 6}, $${i * 7 + 7})`);
+        const rides_placeholderrs = ridesValues.map((_, i) => `($${i * 7 + 1}, $${i * 7 + 2}, $${i * 7 + 3}, $${i * 7 + 4}, $${i * 7 + 5}, $${i * 7 + 6}, $${i * 7 + 7})`);
 
         await client.query(
-            `INSERT INTO Rides (ride_id, rideable_type, started_at, ended_at, start_station_id, end_station_id, member_casual) 
-                VALUES ${ride_placeholderrs}
-                ON CONFLICT (ride_id) DO NOTHING`,
+            getRidesQueryText(rides_placeholderrs),
             ridesValues.flat()
         );
 
@@ -163,10 +118,10 @@ async function insertData(batch, pool) {
     }
 }
 
-server.listen(PORT, (error) => {
+server.listen(process.env.PORT, (error) => {
     if (error) {
         console.error("Error starting server:", error);
     } else {
-        console.log(`Server is running at http://localhost:${PORT}`);
+        console.log(`Server is running at http://localhost:${process.env.PORT}`);
     }
 });
